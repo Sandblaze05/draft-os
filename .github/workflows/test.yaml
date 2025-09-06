@@ -25,7 +25,7 @@ jobs:
 
       # 4. Upload the ISO artifact
       - name: Upload ISO artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: os-iso
           path: build/*.iso
