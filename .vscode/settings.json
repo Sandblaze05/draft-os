@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        ".fantomasignore": "ignore",
+        "print.h": "c",
+        "compare": "c",
+        "cstdint": "c"
+    }
+}

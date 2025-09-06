@@ -1,0 +1,31 @@
+name: Build OS ISO
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout your repo
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # 2. Build the docker image
+      - name: Build buildenv image
+        run: docker build buildenv -t os-buildenv
+
+      # 3. Run make iso inside container
+      - name: Run make iso
+        run: docker run --rm -v ${{ github.workspace }}:/root/env os-buildenv make iso
+
+      # 4. Upload the ISO artifact
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: os-iso
+          path: build/*.iso
