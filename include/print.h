@@ -26,4 +26,7 @@ void print_clear();
 void print_char(char character);
 void print_str(char* string);
 void print_int(int number);
+void print_hex(uint64_t number);
+void print_at(size_t row, size_t col, const char* string);
+void kprintf(const char* format, ...);
 void print_set_color(uint8_t foreground, uint8_t background);
