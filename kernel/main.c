@@ -1,18 +1,30 @@
 #include <stdint.h>
+#include <stddef.h>
 #include "print.h"
 
+#define PAGE_SIZE 4096
+#define MULTIBOOT_MEMORY_AVAILABLE 1
+
+#define BIT_SET(bitmap, bit)   ( (bitmap)[(bit) >> 3] |=  (1 << ((bit) & 7)) )
+#define BIT_CLEAR(bitmap, bit) ( (bitmap)[(bit) >> 3] &= ~(1 << ((bit) & 7)) )
+#define BIT_TEST(bitmap, bit)  ( (bitmap)[(bit) >> 3] &   (1 << ((bit) & 7)) )
+
 extern uint64_t multiboot_info_addr;
+
+static uint8_t* pmm_bitmap = NULL;
+static size_t   pmm_bitmap_size = 0;   /* bytes */
+static size_t   pmm_total_pages = 0;
 
 struct multiboot2_tag {
     uint32_t type;
     uint32_t size;
-};
+} __attribute__((packed));
 
 struct multiboot2_mmap_entry {
     uint64_t addr;
     uint64_t len;
     uint32_t type;
-    uint32_t zero;  // reserved, must be zero
+    uint32_t zero;
 } __attribute__((packed));
 
 struct multiboot2_tag_mmap {
@@ -23,150 +35,164 @@ struct multiboot2_tag_mmap {
     struct multiboot2_mmap_entry entries[];
 } __attribute__((packed));
 
-static int is_valid_memory_range(uint64_t addr, uint64_t size) {
-    if (addr == 0) return 0;                   // NULL pointer
-    if (size == 0) return 0;                   // Zero size
-    if (size > 0x10000000) return 0;           // Suspiciously large (256MB+)
-    if (addr + size < addr) return 0;          // Overflow
-    return 1;
-}
 
 void parse_memory_map(uint64_t multiboot_info_addr) {
-    if (!is_valid_memory_range(multiboot_info_addr, 16)) {
-        print_str("Invalid multiboot info address\n");
+    uint8_t* base = (uint8_t*) (uintptr_t) multiboot_info_addr;
+
+    if (!base) {
+        print_str("MBI addr null\n");
         return;
     }
-    
-    uint8_t* addr = (uint8_t*)multiboot_info_addr;
-    
-    print_str("Multiboot info at: ");
-    print_hex(multiboot_info_addr);
-    print_str("\n");
-    
-    // read total size (first 4 bytes)
-    uint32_t total_size = *(uint32_t*)addr;
-    print_str("Total multiboot info size: ");
-    print_int(total_size);
-    print_str("\n");
-    
-    // sanity check the total size
-    if (total_size < 8 || total_size > 0x10000) {  // 64KB max seems reasonable
-        print_str("Invalid multiboot info size\n");
+
+    uint32_t total_size = *(uint32_t*)base;
+    kprintf("Multiboot info at: 0x%x\n", multiboot_info_addr);
+    kprintf("Total multiboot info size: %d\n", total_size);
+    if (total_size < 8 || total_size > 0x20000) {
+        print_str("Suspicious multiboot total size\n");
         return;
     }
-    
-    // skip first 8 bytes (total_size + reserved)
-    struct multiboot2_tag* tag = (struct multiboot2_tag*)(addr + 8);
-    uint8_t* end_addr = addr + total_size;
-    
+
+    struct multiboot2_tag* tag = (struct multiboot2_tag*)(base + 8);
+    uint8_t* end_addr = base + total_size;
+
     while ((uint8_t*)tag < end_addr) {
-        // bounds check for tag header
-        if ((uint8_t*)tag + sizeof(struct multiboot2_tag) > end_addr) {
-            print_str("Tag header extends beyond multiboot info\n");
+        if ((uint8_t*)tag + sizeof(*tag) > end_addr) {
+            print_str("Tag header extends beyond MBI\n");
             break;
         }
-        
-        print_str("Tag type: ");
-        print_int(tag->type);
-        print_str(", size: ");
-        print_int(tag->size);
-        print_str("\n");
-        
-        // check for end tag
-        if (tag->type == 0) {
-            print_str("End tag found\n");
+
+        kprintf("Tag type: %d, size: %d\n", tag->type, tag->size);
+
+        if (tag->type == 0) { /* end */
+            print_str("End tag\n");
             break;
         }
-        
-        // sanity check tag size
-        if (tag->size < 8 || tag->size > total_size) {
+
+        if (tag->size < 8 || (uint8_t*)tag + tag->size > end_addr) {
             print_str("Invalid tag size\n");
             break;
         }
-        
-        // bounds check for full tag
-        if ((uint8_t*)tag + tag->size > end_addr) {
-            print_str("Tag extends beyond multiboot info\n");
-            break;
-        }
-        
-        if (tag->type == 6) {  // memory map tag
-            print_str("Found memory map tag\n");
-            
+
+        if (tag->type == 6) { // memory map
             struct multiboot2_tag_mmap* mmap_tag = (struct multiboot2_tag_mmap*)tag;
-            
-            // verify we have enough space for the mmap header
-            if (tag->size < sizeof(struct multiboot2_tag_mmap)) {
-                print_str("Memory map tag too small\n");
+
+            if (mmap_tag->size < sizeof(*mmap_tag)) {
+                print_str("MMAP tag too small\n");
                 goto next_tag;
             }
-            
-            print_str("Entry size: ");
-            print_int(mmap_tag->entry_size);
-            print_str(", Entry version: ");
-            print_int(mmap_tag->entry_version);
-            print_str("\n");
-            
-            // calculate number of entries safely
-            uint32_t entries_data_size = mmap_tag->size - sizeof(struct multiboot2_tag_mmap);
-            
+
+            kprintf("Entry size: %d, Entry version: %d\n", mmap_tag->entry_size, mmap_tag->entry_version);
+
+            uint32_t entries_data_bytes = mmap_tag->size - sizeof(*mmap_tag);
             if (mmap_tag->entry_size == 0) {
-                print_str("Invalid entry size (0)\n");
+                print_str("MMAP entry_size == 0\n");
                 goto next_tag;
             }
-            
-            uint32_t entries = entries_data_size / mmap_tag->entry_size;
-            
-            print_str("Number of memory map entries: ");
-            print_int(entries);
-            print_str("\n");
-            
-            // Limit entries to prevent runaway loops
-            if (entries > 100) {
-                print_str("Too many entries, limiting to 100\n");
-                entries = 100;
+            uint32_t entries = entries_data_bytes / mmap_tag->entry_size;
+            kprintf("Number of mmap entries: %d\n", entries);
+
+            if (entries > 1000) {
+                kprintf("Clamping entries from %d to 1000\n", entries);
+                entries = 1000;
             }
-            
+
             for (uint32_t i = 0; i < entries; i++) {
-                uint8_t* entry_ptr = (uint8_t*)mmap_tag->entries + i * mmap_tag->entry_size;
-                
-                // Bounds check
-                if (entry_ptr + sizeof(struct multiboot2_mmap_entry) > end_addr) {
-                    print_str("Entry extends beyond multiboot info\n");
+                uint8_t* e_ptr = (uint8_t*)mmap_tag->entries + (size_t)i * mmap_tag->entry_size;
+                if (e_ptr + sizeof(struct multiboot2_mmap_entry) > end_addr) {
+                    print_str("MMAP entry out of bounds\n");
                     break;
                 }
-                
-                struct multiboot2_mmap_entry* entry = (struct multiboot2_mmap_entry*)entry_ptr;
-                
-                print_str("Memory region ");
-                print_int(i);
-                print_str(": ");
-                print_hex(entry->addr);
-                print_str(" - ");
-                print_hex(entry->addr + entry->len - 1);
-                print_str(" (");
-                print_hex(entry->len);
-                print_str(" bytes) Type: ");
-                print_int(entry->type);
-                print_str("\n");
+                struct multiboot2_mmap_entry* e = (struct multiboot2_mmap_entry*)e_ptr;
+                kprintf("Region %d: 0x%x - 0x%x (%x bytes) Type: %d\n",
+                        i, e->addr, e->addr + e->len - 1, e->len, e->type);
             }
+
+            pmm_init(mmap_tag);
         }
-        
-        next_tag:
-        // Move to next tag with 8-byte alignment
-        uint32_t aligned_size = (tag->size + 7) & ~7;
-        tag = (struct multiboot2_tag*)((uint8_t*)tag + aligned_size);
+
+    next_tag:
+        // align tags to 8 bytes
+        uint32_t aligned = (tag->size + 7) & ~7U;
+        tag = (struct multiboot2_tag*)((uint8_t*)tag + aligned);
     }
 }
 
 
+void pmm_init(struct multiboot2_tag_mmap* mmap_tag) {
+    // calc mem
+    uint64_t max_addr = 0;
+    uint32_t entries = (mmap_tag->size - sizeof(*mmap_tag)) / mmap_tag->entry_size;
+    for (uint32_t i = 0; i < entries; i++) {
+        struct multiboot2_mmap_entry* e = (void*)((uint8_t*)mmap_tag->entries + (size_t)i * mmap_tag->entry_size);
+        uint64_t top = e->addr + e->len;
+        if (top > max_addr) max_addr = top;
+    }
 
+    pmm_total_pages = (max_addr + PAGE_SIZE - 1) / PAGE_SIZE;   // round up total pages
+    pmm_bitmap_size = (pmm_total_pages + 7) / 8;                // round up bytes
+
+    extern uint8_t _kernel_start;
+    extern uint8_t _kernel_end;
+
+    // place bitmap right after kernel_end page-aligned
+    uint64_t bitmap_addr = ((uint64_t)&_kernel_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    pmm_bitmap = (uint8_t*)(uintptr_t)bitmap_addr;
+
+    // mark all as used
+    for (size_t i = 0; i < pmm_bitmap_size; i++) pmm_bitmap[i] = 0xFF;
+
+    // clear bits for free regions
+    for (uint32_t i = 0; i < entries; i++) {
+        struct multiboot2_mmap_entry* e = (void*)((uint8_t*)mmap_tag->entries + (size_t)i * mmap_tag->entry_size);
+        if (e->type != MULTIBOOT_MEMORY_AVAILABLE) continue;
+
+        uint64_t start_page = e->addr / PAGE_SIZE;
+        uint64_t end_page   = (e->addr + e->len + PAGE_SIZE - 1) / PAGE_SIZE; 
+
+        if (end_page > pmm_total_pages) end_page = pmm_total_pages;
+
+        for (uint64_t p = start_page; p < end_page; p++) {
+            BIT_CLEAR(pmm_bitmap, p);
+        }
+    }
+
+    // reserve kernel pages and bitmap
+    uint64_t kernel_start_page = ((uint64_t)&_kernel_start) / PAGE_SIZE;
+    uint64_t kernel_end_page   = (((uint64_t)&_kernel_end) + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    // kernel reserved
+    for (uint64_t p = kernel_start_page; p < kernel_end_page; p++) BIT_SET(pmm_bitmap, p);
+
+    // reserved bitmap area
+    uint64_t bmp_start_page = bitmap_addr / PAGE_SIZE;
+    uint64_t bmp_end_page   = (bitmap_addr + pmm_bitmap_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (uint64_t p = bmp_start_page; p < bmp_end_page; p++) BIT_SET(pmm_bitmap, p);
+
+    // reserve 0 - 1MB
+    for (uint64_t p = 0; p < (0x100000 / PAGE_SIZE); p++) BIT_SET(pmm_bitmap, p);
+
+    kprintf("PMM: total_pages=%d, bitmap_bytes=%d, bitmap_addr=0x%x\n",
+            pmm_total_pages, pmm_bitmap_size, (uint64_t)bitmap_addr);
+}
+
+void* pmm_alloc_page(void) {
+    for (size_t page = 0; page < pmm_total_pages; page++) {
+        if (!BIT_TEST(pmm_bitmap, page)) {
+            BIT_SET(pmm_bitmap, page);
+            return (void*)(page * PAGE_SIZE);
+        }
+    }
+    return NULL; // out of mem -_-
+}
+
+
+void pmm_free_page(void* addr) {
+    size_t page = (uint64_t) addr / PAGE_SIZE;
+    BIT_CLEAR(pmm_bitmap, page);
+}
 
 void kernel_main(void) {
     print_str("Kernel started\n");
-    print_str("Multiboot info from global: 0x");
-    print_hex(multiboot_info_addr);
-    print_str("\n");
     
     if (multiboot_info_addr != 0) {
         parse_memory_map(multiboot_info_addr);
