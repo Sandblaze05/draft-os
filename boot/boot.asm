@@ -1,9 +1,16 @@
 global start
+global multiboot_info_addr
 extern long_mode_start
+
+section .data
+multiboot_info_addr: dq 0
 
 section .text
 bits 32
 start:
+
+    mov [multiboot_info_addr], ebx          ; store multiboot info pointer
+    mov dword [multiboot_info_addr + 4], 0  ; Clear upper 32 bits
 
     call check_multiboot
     call check_cpuid
