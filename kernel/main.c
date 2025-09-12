@@ -45,7 +45,7 @@ void parse_memory_map(uint64_t multiboot_info_addr) {
     }
 
     uint32_t total_size = *(uint32_t*)base;
-    kprintf("Multiboot info at: 0x%x\n", multiboot_info_addr);
+    kprintf("Multiboot info at: %x\n", multiboot_info_addr);
     kprintf("Total multiboot info size: %d\n", total_size);
     if (total_size < 8 || total_size > 0x20000) {
         print_str("Suspicious multiboot total size\n");
@@ -103,7 +103,7 @@ void parse_memory_map(uint64_t multiboot_info_addr) {
                     break;
                 }
                 struct multiboot2_mmap_entry* e = (struct multiboot2_mmap_entry*)e_ptr;
-                kprintf("Region %d: 0x%x - 0x%x (%x bytes) Type: %d\n",
+                kprintf("Region %d: %x - %x (%x bytes) Type: %d\n",
                         i, e->addr, e->addr + e->len - 1, e->len, e->type);
             }
 
@@ -171,7 +171,7 @@ void pmm_init(struct multiboot2_tag_mmap* mmap_tag) {
     // reserve 0 - 1MB
     for (uint64_t p = 0; p < (0x100000 / PAGE_SIZE); p++) BIT_SET(pmm_bitmap, p);
 
-    kprintf("PMM: total_pages=%d, bitmap_bytes=%d, bitmap_addr=0x%x\n",
+    kprintf("PMM: total_pages=%d, bitmap_bytes=%d, bitmap_addr=%x\n",
             pmm_total_pages, pmm_bitmap_size, (uint64_t)bitmap_addr);
 }
 
