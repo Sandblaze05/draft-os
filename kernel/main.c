@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "print.h"
+#include "panic.h"
 
 #define PAGE_SIZE 4096
 #define MULTIBOOT_MEMORY_AVAILABLE 1
@@ -108,6 +109,12 @@ void parse_memory_map(uint64_t multiboot_info_addr) {
             }
 
             pmm_init(mmap_tag);
+            
+            // print first 64 pages
+            for (int i = 0; i < 64; i++) {
+                kprintf("%d", BIT_TEST(pmm_bitmap, i) ? 1 : 0);
+            }
+            print_str("\n");
         }
 
     next_tag:
@@ -124,8 +131,11 @@ void pmm_init(struct multiboot2_tag_mmap* mmap_tag) {
     uint32_t entries = (mmap_tag->size - sizeof(*mmap_tag)) / mmap_tag->entry_size;
     for (uint32_t i = 0; i < entries; i++) {
         struct multiboot2_mmap_entry* e = (void*)((uint8_t*)mmap_tag->entries + (size_t)i * mmap_tag->entry_size);
-        uint64_t top = e->addr + e->len;
-        if (top > max_addr) max_addr = top;
+
+        if (e->type == MULTIBOOT_MEMORY_AVAILABLE) {
+            uint64_t top = e->addr + e->len;
+            if (top > max_addr) max_addr = top;
+        }
     }
 
     pmm_total_pages = (max_addr + PAGE_SIZE - 1) / PAGE_SIZE;   // round up total pages
@@ -146,8 +156,8 @@ void pmm_init(struct multiboot2_tag_mmap* mmap_tag) {
         struct multiboot2_mmap_entry* e = (void*)((uint8_t*)mmap_tag->entries + (size_t)i * mmap_tag->entry_size);
         if (e->type != MULTIBOOT_MEMORY_AVAILABLE) continue;
 
-        uint64_t start_page = e->addr / PAGE_SIZE;
-        uint64_t end_page   = (e->addr + e->len + PAGE_SIZE - 1) / PAGE_SIZE; 
+        uint64_t start_page = (e->addr + PAGE_SIZE - 1) / PAGE_SIZE;
+        uint64_t end_page   = (e->addr + e->len) / PAGE_SIZE; 
 
         if (end_page > pmm_total_pages) end_page = pmm_total_pages;
 
@@ -193,12 +203,23 @@ void pmm_free_page(void* addr) {
 
 void kernel_main(void) {
     print_str("Kernel started\n");
+
+    // kernel_panic("Test panic");
     
     if (multiboot_info_addr != 0) {
         parse_memory_map(multiboot_info_addr);
     } 
     else {
-        print_str("No multiboot info available\n");
+        kernel_panic("No multiboot info available");       
+    }
+
+    void *pageTest = pmm_alloc_page();
+    if (pageTest) {
+        print_set_color(PRINT_COLOR_BLUE, PRINT_COLOR_BLACK);
+        kprintf("Allocation successful at physical addr: %x\n", (uint64_t)pageTest);
+        pmm_free_page(pageTest);
+    } else {
+        print_str("Allocation failed\n");
     }
 
     while (1) {
